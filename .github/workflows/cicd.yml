@@ -59,11 +59,19 @@ jobs:
         run: |
           docker build -t maven-cicd-demo:test .
 
-      - name: Test run container locally
+      - name: Test run container and verify HTTP endpoints
         run: |
-          output=$(docker run --rm maven-cicd-demo:test)
-          echo "Local Container Output: $output"
-          test "$output" = "Hello World!"
+          docker run -d --name test-app -p 8080:8080 maven-cicd-demo:test
+          sleep 4
+          echo "Testing /health endpoint..."
+          curl -f http://localhost:8080/health
+          echo -e "\nTesting / endpoint..."
+          curl -f http://localhost:8080/
+          echo -e "\nTesting /api/info endpoint..."
+          curl -f http://localhost:8080/api/info
+          echo -e "\nStopping test container..."
+          docker stop test-app
+          docker rm test-app
 
       - name: Log in to Docker Hub
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && env.DOCKERHUB_USER != '' && env.DOCKERHUB_TOKEN != ''
@@ -86,9 +94,11 @@ jobs:
         if: github.event_name == 'push' && github.ref == 'refs/heads/main' && env.DOCKERHUB_USER != '' && env.DOCKERHUB_TOKEN != ''
         run: |
           docker pull "${{ secrets.DOCKERHUB_USERNAME }}/maven-cicd-demo:latest"
-          output=$(docker run --rm "${{ secrets.DOCKERHUB_USERNAME }}/maven-cicd-demo:latest")
-          echo "Published Container Output: $output"
-          test "$output" = "Hello World!"
+          docker run -d --name deployed-app -p 8080:8080 "${{ secrets.DOCKERHUB_USERNAME }}/maven-cicd-demo:latest"
+          sleep 4
+          curl -f http://localhost:8080/health
+          docker stop deployed-app
+          docker rm deployed-app
 
       - name: Pipeline Notice
         if: env.DOCKERHUB_USER == '' || env.DOCKERHUB_TOKEN == ''

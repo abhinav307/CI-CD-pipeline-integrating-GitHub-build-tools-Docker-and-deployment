@@ -145,61 +145,70 @@ git --version
 
 ### 1. Java Application & Unit Testing
 
-The core application is located at `src/main/java/com/abhinav/mavendemo/App.java`:
+The application is implemented as an enterprise-grade RESTful microservice at [`App.java`](file:///C:/Users/unkno/Downloads/a%20b%20c/Safe%20image/kubernet_modue/maven-cicd-demo/src/main/java/com/abhinav/mavendemo/App.java) using standard JDK HTTP server components (`com.sun.net.httpserver.HttpServer`), ensuring zero external runtime dependencies and instant startup (<100ms):
 
-```java
-package com.abhinav.mavendemo;
+- **Port Resolution**: Dynamically configures the listening port via CLI argument (`--port=XXXX`), standard environment variable (`PORT`), or defaults to `8080`.
+- **Endpoints Provided**:
+  - `GET /`: Returns service identity, version, operational status, and greeting in JSON.
+  - `GET /health` & `GET /healthz`: Automated health-check endpoints for Docker and Kubernetes liveness/readiness probes.
+  - `GET /api/info`: Live runtime telemetry (Java version, OS, CPU cores, active memory metrics).
+- **Graceful Lifecycle**: Implements a JVM shutdown hook (`Runtime.getRuntime().addShutdownHook`) for clean termination upon receiving `SIGTERM`/`SIGINT`.
 
-public final class App {
-    private App() { }
-
-    public static String message() {
-        return "Hello World!";
-    }
-
-    public static void main(String[] args) {
-        System.out.println(message());
-    }
-}
-```
-
-Unit testing is handled by JUnit 5 (`src/test/java/com/abhinav/mavendemo/AppTest.java`):
-
-```java
-package com.abhinav.mavendemo;
-
-import org.junit.jupiter.api.Test;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-
-class AppTest {
-    @Test
-    void messageReturnsHelloWorld() {
-        assertEquals("Hello World!", App.message());
-    }
-}
-```
+Unit and HTTP integration testing is powered by **JUnit 5** and **Java 17 `HttpClient`** at [`AppTest.java`](file:///C:/Users/unkno/Downloads/a%20b%20c/Safe%20image/kubernet_modue/maven-cicd-demo/src/test/java/com/abhinav/mavendemo/AppTest.java):
+- Verifies message contents and service contracts.
+- Tests dynamic CLI argument and environment variable port fallback resolution.
+- Spawns the server on ephemeral test ports and asserts HTTP 200 responses, JSON payloads, and HTTP 405 Method Not Allowed handling across all routes.
 
 ### 2. Maven Project Object Model (`pom.xml`)
 
 Key Maven configuration properties:
 - **`maven.compiler.release`**: Set to `17` to ensure bytecode compatibility.
 - **`maven-compiler-plugin`** (`v3.13.0`): Compiles source files using the release flag.
-- **`maven-surefire-plugin`** (`v3.5.2`): Executes JUnit 5 platform tests during the `test` phase.
+- **`maven-surefire-plugin`** (`v3.5.2`): Executes all JUnit 5 platform tests during the `test` phase.
 - **`maven-jar-plugin`** (`v3.4.2`): Packages an executable manifest with `Main-Class: com.abhinav.mavendemo.App` into `target/maven-cicd-demo.jar`.
 
 ### 3. Containerization Strategy (`Dockerfile`)
 
-The image packaging uses the minimal **Eclipse Temurin 17 JRE** base image, minimizing the attack surface and download size:
+The container follows enterprise container hardening standards:
 
 ```dockerfile
 FROM eclipse-temurin:17-jre
 
+LABEL maintainer="abhinav307" \
+      description="Maven CI/CD Microservice"
+
+# Create a dedicated non-root user and group
+RUN groupadd -r appgroup && useradd -r -g appgroup -d /app -s /sbin/nologin appuser
+
 WORKDIR /app
 
+# Copy the built JAR artifact
 COPY target/maven-cicd-demo.jar app.jar
+
+# Set ownership to non-root user
+RUN chown -R appuser:appgroup /app
+
+# Switch to non-root user
+USER appuser
+
+# Expose microservice HTTP port
+EXPOSE 8080
+
+# Configure container runtime environment variables
+ENV PORT=8080 \
+    JAVA_TOOL_OPTIONS="-XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0"
+
+# Container healthcheck probe
+HEALTHCHECK --interval=15s --timeout=3s --start-period=5s --retries=3 \
+  CMD curl -f http://localhost:${PORT}/health || exit 1
 
 ENTRYPOINT ["java", "-jar", "/app/app.jar"]
 ```
+
+Key features:
+- **Security**: Runs under a dedicated unprivileged user (`appuser`, UID/GID separated) rather than `root`.
+- **Resource Management**: Automatically tunes heap sizing to cgroup limits (`-XX:+UseContainerSupport -XX:MaxRAMPercentage=75.0`).
+- **Healthcheck Probe**: Probes `http://localhost:8080/health` so Docker and orchestration engines track health status in real time.
 
 ---
 
@@ -269,7 +278,7 @@ mvn -B clean package
 Expected output:
 ```text
 [INFO] Running com.abhinav.mavendemo.AppTest
-[INFO] Tests run: 1, Failures: 0, Errors: 0, Skipped: 0
+[INFO] Tests run: 8, Failures: 0, Errors: 0, Skipped: 0
 [INFO] Building jar: ...\target\maven-cicd-demo.jar
 [INFO] BUILD SUCCESS
 ```
@@ -279,9 +288,14 @@ Expected output:
 ```powershell
 java -jar target/maven-cicd-demo.jar
 ```
-Output:
+Server starts on port 8080:
 ```text
-Hello World!
+==================================================
+  maven-cicd-demo v1.0.0 is running
+  Root Endpoint:   http://localhost:8080/
+  Health Check:    http://localhost:8080/health
+  Runtime Info:    http://localhost:8080/api/info
+==================================================
 ```
 
 ### 3. Build the Docker Image
@@ -290,22 +304,24 @@ Hello World!
 docker build -t maven-cicd-demo:local .
 ```
 
-### 4. Run the Container
+### 4. Run the Container as a Microservice
 
 ```powershell
-docker run --rm maven-cicd-demo:local
+docker run -d --name ci-cd-pipeline-demo -p 8080:8080 maven-cicd-demo:local
 ```
-Output:
-```text
-Hello World!
+Test the running container endpoints:
+```powershell
+curl http://localhost:8080/
+curl http://localhost:8080/health
+curl http://localhost:8080/api/info
 ```
 
 ### 5. Automated Local Script
 
-Run the automated helper script (handles build, packaging, image creation, and execution):
+Run the automated helper script (handles build, packaging, image creation, container launch, and health-check verification):
 
 ```powershell
-pwsh -ExecutionPolicy Bypass -File .\scripts\run-local.ps1
+powershell -ExecutionPolicy Bypass -File .\scripts\run-local.ps1
 ```
 
 ---
@@ -314,9 +330,11 @@ pwsh -ExecutionPolicy Bypass -File .\scripts\run-local.ps1
 
 | Pipeline Stage | Verification Method | Expected Result |
 | :--- | :--- | :--- |
-| **Unit Test** | `mvn test` | `Tests run: 1, Failures: 0, Errors: 0, Skipped: 0` |
+| **Unit & Integration Test** | `mvn test` | `Tests run: 8, Failures: 0, Errors: 0, Skipped: 0` |
 | **Packaging** | `Test-Path target/maven-cicd-demo.jar` | `True` |
-| **Local Container** | `docker run --rm maven-cicd-demo:local` | `Hello World!` (Exit Code: 0) |
+| **Local Container** | `docker ps --filter "name=ci-cd-pipeline-demo"` | `Status: Up ... (healthy)` |
+| **Service Endpoint** | `curl http://localhost:8080/` | HTTP 200 JSON (`status: "UP"`) |
+| **Health Probe** | `curl http://localhost:8080/health` | HTTP 200 JSON (`uptime_seconds > 0`) |
 | **CI Artifact** | `actions/upload-artifact@v4` | Artifact `app-jar` visible in workflow run summary |
 | **Docker Registry** | `docker pull <user>/maven-cicd-demo:latest` | Status: Downloaded newer image |
 | **CD Smoke Test** | `docker run --rm <user>/maven-cicd-demo:latest` | Exact string match: `Hello World!` |
