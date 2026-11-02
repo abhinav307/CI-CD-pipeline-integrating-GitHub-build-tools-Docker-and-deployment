@@ -35,11 +35,9 @@ jobs:
           if-no-files-found: error
           retention-days: 3
 
-  docker-build-push:
-    name: Build and Push Docker Image
+  docker-build:
+    name: Build and Test Docker Container
     needs: build-test
-    # Do not publish images for pull requests from forks or untrusted branches.
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -54,13 +52,39 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Build Docker image locally
+        run: |
+          docker build -t maven-cicd-demo:test .
+
+      - name: Verify container execution
+        run: |
+          output=$(docker run --rm maven-cicd-demo:test)
+          echo "Container Output: $output"
+          test "$output" = "Hello World!"
+
+      - name: Check for Docker Hub Secrets
+        id: docker_auth
+        env:
+          DOCKERHUB_USER: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+        run: |
+          if [ -n "$DOCKERHUB_USER" ] && [ -n "$DOCKERHUB_TOKEN" ]; then
+            echo "has_auth=true" >> "$GITHUB_OUTPUT"
+            echo "Docker Hub credentials detected. Publishing to Docker Hub..."
+          else
+            echo "has_auth=false" >> "$GITHUB_OUTPUT"
+            echo "::notice ::Docker Hub credentials (DOCKERHUB_USERNAME / DOCKERHUB_TOKEN) are not set. Pushing to Docker Hub was skipped; container built and verified locally on runner."
+          fi
+
       - name: Log in to Docker Hub
+        if: steps.docker_auth.outputs.has_auth == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build and push Docker image
+        if: steps.docker_auth.outputs.has_auth == 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -70,8 +94,9 @@ jobs:
             ${{ secrets.DOCKERHUB_USERNAME }}/maven-cicd-demo:${{ github.sha }}
 
   deploy:
-    name: Deploy (Pull and Run Container)
-    needs: docker-build-push
+    name: Deploy (Pull and Verify Published Container)
+    needs: docker-build
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && secrets.DOCKERHUB_USERNAME != '' && secrets.DOCKERHUB_TOKEN != '' }}
     runs-on: ubuntu-latest
     steps:
       - name: Log in to Docker Hub
@@ -83,7 +108,7 @@ jobs:
       - name: Pull the published image
         run: docker pull "${{ secrets.DOCKERHUB_USERNAME }}/maven-cicd-demo:latest"
 
-      - name: Run the container and verify its output
+      - name: Run the published container and verify output
         run: |
           output=$(docker run --rm "${{ secrets.DOCKERHUB_USERNAME }}/maven-cicd-demo:latest")
           echo "$output"
