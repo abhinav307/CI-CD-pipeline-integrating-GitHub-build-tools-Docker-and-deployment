@@ -1,0 +1,90 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    name: Build and Test (Maven)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: temurin
+          cache: maven
+
+      - name: Build and test with Maven
+        run: mvn -B clean package
+
+      - name: Save JAR for the next stage
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-jar
+          path: target/maven-cicd-demo.jar
+          if-no-files-found: error
+          retention-days: 3
+
+  docker-build-push:
+    name: Build and Push Docker Image
+    needs: build-test
+    # Do not publish images for pull requests from forks or untrusted branches.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Download JAR from build stage
+        uses: actions/download-artifact@v4
+        with:
+          name: app-jar
+          path: target
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/maven-cicd-demo:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/maven-cicd-demo:${{ github.sha }}
+
+  deploy:
+    name: Deploy (Pull and Run Container)
+    needs: docker-build-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Pull the published image
+        run: docker pull "${{ secrets.DOCKERHUB_USERNAME }}/maven-cicd-demo:latest"
+
+      - name: Run the container and verify its output
+        run: |
+          output=$(docker run --rm "${{ secrets.DOCKERHUB_USERNAME }}/maven-cicd-demo:latest")
+          echo "$output"
+          test "$output" = "Hello World!"
